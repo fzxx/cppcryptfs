@@ -191,6 +191,13 @@ int getopt_long(int argc, wchar_t* const argv[], const wchar_t* optstring,
     if (wcsncmp(o->name, current_argument, argument_name_length) == 0) {
       match = o;
       ++num_matches;
+      /* An exact match wins over prefix matches, so an option whose name
+         is a prefix of another one (--config / --configbackups) is not
+         ambiguous. */
+      if (wcslen(o->name) == argument_name_length) {
+        num_matches = 1;
+        break;
+      }
     }
   }
 

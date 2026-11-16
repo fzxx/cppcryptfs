@@ -468,6 +468,8 @@ cppcryptfsctl 在成功时将 ERRORLEVEL 设置为 0，发生错误时设置为 
   -V, --volumename=NAME       为文件系统指定卷名
   -T, --plaintext             使用明文文件名（默认是 AES256-EME 模式）
   --deterministicnames        禁用创建 gocryptfs.diriv 文件。
+  --configbackups 1|0         启用/禁用 gocryptfs.conf.bak 备份。默认禁用（0）
+  --dirivbackups 1|0          启用/禁用 gocryptfs.diriv.bak 备份。默认禁用（0）
   -S, --siv                   使用 AES256-SIV 进行数据加密（默认是 GCM 模式）
   -X, --chacha                使用 XChaCha20-Poly1305 进行数据加密（默认是 GCM 模式）
   -L, --longnames [1|0]       启用/禁用长文件名。默认启用（1）
@@ -488,6 +490,11 @@ cppcryptfsctl 在成功时将 ERRORLEVEL 设置为 0，发生错误时设置为 
 要获取 cppcryptfsctl 的版本，你必须指定初始化选项和 -v。例如，使用 cppcryptfsctl -I -v，否则它将尝试获取并打印正在运行的 cppcryptfs 实例的版本。
 
 有些选项在初始化和挂载时都通用（--config 和 --reverse）。
+
+备份文件：启用 --configbackups 或 --dirivbackups 后，cppcryptfs 会在加密目录中原文件旁边保留配置文件副本（gocryptfs.conf.bak）
+和每个目录的 IV 文件副本（gocryptfs.diriv.bak）。cppcryptfs 会在挂载视图中隐藏这些文件，并且只在原文件丢失或损坏时使用它们。
+gocryptfs 不认识这些文件，会把它们当作加密文件名处理，跳过并可能记录警告。如果同一个目录还要被 gocryptfs
+使用，请关闭对应的备份选项。
 
 注意：当使用选项的短格式时，在选项和其参数之间不应该使用等号。当使用选项的长格式时，等号是可选的。例如，以下这些用法都是可行的。
 

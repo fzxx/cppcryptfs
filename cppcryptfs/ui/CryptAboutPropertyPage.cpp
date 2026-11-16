@@ -228,7 +228,9 @@ BOOL CCryptAboutPropertyPage::OnInitDialog()
 	Style |= LVS_EX_FULLROWSELECT;
 	::SendMessage(pList->m_hWnd, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, Style);
 	
-	pList->InsertColumn(0, L"Component", 0, 720);
+	CRect componentsRect;
+	pList->GetClientRect(&componentsRect);
+	pList->InsertColumn(0, L"", LVCFMT_LEFT, componentsRect.Width() - ::GetSystemMetrics(SM_CXVSCROLL));
 	
 	int i;
 

@@ -38,8 +38,19 @@ using namespace std;
 
 class CryptContext;
 
+// restored is set to true when the iv came from the .bak backup
 bool
-get_dir_iv(CryptContext *con, const WCHAR *path, unsigned char *dir_iv);
+get_dir_iv(CryptContext *con, const WCHAR *path, unsigned char *dir_iv, bool *restored = nullptr);
+
+// copy src over dst through a temporary file so dst is never left half
+// written. a read-only dst can be replaced. returns false on failure.
+bool
+copy_file_atomic(const wstring& src, const wstring& dst);
+
+// copy a diriv file to <diriv>.bak and keep the .bak read-only like the
+// diriv itself. returns false on failure.
+bool
+backup_dir_iv_file(const wstring& diriv_path);
 
 
 typedef int(WINAPI *PCryptFillFindData)(PWIN32_FIND_DATAW fdata, PWIN32_FIND_DATAW fdata_orig, void * dokan_cb, void * dokan_ctx);

@@ -520,6 +520,8 @@ Initializing (cppcryptfsctl only):
   -V, --volumename=NAME       specify volume name for filesystem
   -T, --plaintext             use plaintext filenames (default is AES256-EME)
   --deterministicnames        disable creation of gocryptfs.diriv files.
+  --configbackups 1|0         enable/disable gocryptfs.conf.bak backups. defaults to disabled (0)
+  --dirivbackups 1|0          enable/disable gocryptfs.diriv.bak backups. defaults to disabled (0)
   -S, --siv                   use AES256-SIV for data encr (default is GCM)
   -X, --chacha                use XChaCha20-Poly1305 for data encr (default is GCM)
   -L, --longnames [1|0]       enable/disable LFNs. defaults to enabled (1)
@@ -541,6 +543,12 @@ When creating/initializing a filesystem, cppcryptfsctl will prompt for the passw
 To get the version of cppcryptfsctl, you must specify initialize and -v.  e.g. cppcryptfsctl -I -v, otherwise it will attempt to get and print the version of a running instance of cppcryptfs.
 
 Some options are common to both initializing and mounting (--config and --reverse).
+
+Backup files: with --configbackups or --dirivbackups enabled, cppcryptfs keeps a copy of the config file (gocryptfs.conf.bak) and of
+each directory's IV file (gocryptfs.diriv.bak) next to the original in the encrypted directory. cppcryptfs hides these files in the
+mounted view and only uses them when the original file is lost or damaged. gocryptfs does not know these files and will treat them as
+encrypted file names, skipping them and possibly logging a warning. If a directory is also used by gocryptfs, turn the corresponding
+backup off.
 
 Note: when using the short version of the option, you should not use the equal sign between the option and its argument.  When using the long version of the option, the equal sign is optional. e.g. these will work
 

@@ -2165,18 +2165,76 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
 
     dokanOptions->MountPoint = tdata->mountpoint.c_str();
 
+    // non-fatal notices (config or diriv restored) shown after a good mount
+    wstring restore_notice;
+
     if (!config->read(mes, config_path, reverse)) {
-      if (mes.length() < 1) {
-        mes = LocUtils::GetStringFromResources(IDS_UNABLE_LOAD_CONF);
+      // only a config file that is itself unreadable or damaged may be
+      // replaced, and only by a .bak that passes validation first
+      wstring restore_mes;
+
+      if (!config->CanRestoreFromBak()
+          || !config->restore_config_from_bak(password, reverse, restore_mes)) {
+        if (mes.length() < 1) {
+          mes = LocUtils::GetStringFromResources(IDS_UNABLE_LOAD_CONF);
+        }
+        if (restore_mes.length() > 0) {
+          mes += L"\n";
+          mes += restore_mes;
+        }
+        throw(-1);
       }
-      throw(-1);
+
+      restore_notice = LocUtils::GetStringFromResources(IDS_CONFIG_RESTORED_FROM_BAK);
+
+      if (!config->read(mes, config_path, reverse)) {
+        if (mes.length() < 1) {
+          mes = LocUtils::GetStringFromResources(IDS_UNABLE_LOAD_CONF);
+        }
+        throw(-1);
+      }
+
+      DbgPrint(L"mount: restored config file %s from its .bak\n", config->m_configPath.c_str());
     }
+
+    mes = restore_notice;
 
     wstring config_error_mes;
 
     if (!config->check_config(config_error_mes)) {
-      mes = &config_error_mes[0];
-      throw(-1);
+      // a config that parses but fails these checks may still be a damaged
+      // file. a config from a newer format (version != 2) is never replaced
+      wstring restore_mes;
+
+      bool restored = config->m_Version == 2
+        && config->restore_config_from_bak(password, config->m_reverse, restore_mes);
+
+      if (!restored) {
+        if (restore_mes.length() > 0) {
+          config_error_mes += L"\n";
+          config_error_mes += restore_mes;
+        }
+        mes = &config_error_mes[0];
+        throw(-1);
+      }
+
+      restore_notice = LocUtils::GetStringFromResources(IDS_CONFIG_RESTORED_FROM_BAK);
+
+      if (!config->read(mes, config_path, reverse)) {
+        if (mes.length() < 1) {
+          mes = LocUtils::GetStringFromResources(IDS_UNABLE_LOAD_CONF);
+        }
+        throw(-1);
+      }
+
+      if (!config->check_config(config_error_mes)) {
+        mes = &config_error_mes[0];
+        throw(-1);
+      }
+
+      mes = restore_notice;
+
+      DbgPrint(L"mount: restored config file %s from its .bak after a config check\n", config->m_configPath.c_str());
     }
 
 #ifdef WINDOWS_GRATUITOUS_UPPERCASING // was fixed by Dokany 1.2.0.1000
@@ -2216,6 +2274,29 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
       } catch (...) {
         mes = LocUtils::GetStringFromResources(IDS_UNABLE_INIT_AESSIV);
         throw(-1);
+      }
+    }
+
+    // remember the write-protected state before the first diriv read, so a
+    // read-only mount doesn't try to create .bak files
+    con->m_read_only = config->m_reverse || readonly;
+
+    // a forward volume needs its root diriv to read any filename in the root.
+    // check it now, so a lost diriv doesn't mount as an apparently empty fs
+    if (!config->m_reverse && config->DirIV()) {
+      unsigned char root_diriv[DIR_IV_LEN];
+      bool diriv_restored = false;
+
+      if (!get_dir_iv(con, config->GetBaseDir(), root_diriv, &diriv_restored)) {
+        mes = LocUtils::GetStringFromResources(IDS_ROOT_DIRIV_UNREADABLE);
+        throw(-1);
+      }
+
+      if (diriv_restored) {
+        if (restore_notice.length() > 0)
+          restore_notice += L"\n";
+        restore_notice += LocUtils::GetStringFromResources(IDS_DIRIV_RESTORED_FROM_BAK);
+        mes = restore_notice;
       }
     }
 
@@ -2275,8 +2356,8 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
     }
 
     if (config->m_reverse || readonly) {
+      // m_read_only was already set right after the config was read
       dokanOptions->Options |= DOKAN_OPTION_WRITE_PROTECT;
-	  con->m_read_only = true;
     } else if (opts.mountmanager) {
       if (opts.mountmanagerwarn && !have_security_name_privilege()) {
 
@@ -2367,6 +2448,13 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
       }
       throw(-1);
     }
+
+    // the volume is mounted -- leave a .bak copy of the config file behind
+    // so future mounts can recover from it if the config file gets damaged.
+    // best-effort, a failed backup doesn't affect the mount. a read-only
+    // mount, including reverse mode, must not write to the base directory
+    if (!readonly && !reverse)
+      config->backup_config_file();
 
   } catch (...) {
     retval = -1;

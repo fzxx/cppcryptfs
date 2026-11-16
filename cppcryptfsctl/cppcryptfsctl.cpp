@@ -167,6 +167,10 @@ static int do_self_args(int argc, wchar_t* const argv[])
 
     bool deterministicnames = false;
 
+    bool configbackups = false;
+
+    bool dirivbackups = false;
+
     int scryptn = 0;
 
     LockZeroBuffer<wchar_t> password(PASSWORD_BUFLEN, false);
@@ -189,6 +193,9 @@ static int do_self_args(int argc, wchar_t* const argv[])
     {
         {L"init",   required_argument,  0, 'I'},  
         {L"deterministicnames",   no_argument,  0, 'd'},
+        // these two are long-option only, they have no short form
+        {L"configbackups",  required_argument, 0, 'G' },
+        {L"dirivbackups",  required_argument, 0, 'B'},
         {L"config", required_argument, 0, 'c' },      
         {L"reverse",  no_argument, 0, 's' },
         {L"plaintextnames",  no_argument, 0, 'T' },
@@ -255,6 +262,14 @@ static int do_self_args(int argc, wchar_t* const argv[])
             break;
         case 'd':
             deterministicnames = true;
+            break;
+        case 'G':
+            if (get_binary_flag("configbackups", optarg, configbackups) != 0)
+                return 1;
+            break;
+        case 'B':
+            if (get_binary_flag("dirivbackups", optarg, dirivbackups) != 0)
+                return 1;
             break;
         case 'c':
             config_path = optarg;
@@ -382,7 +397,7 @@ static int do_self_args(int argc, wchar_t* const argv[])
             return 1;
         }        
     
-        bool result = config.create(fs_path.c_str(), config_path.c_str(), password.m_buf, !plaintext_names, plaintext_names, longnames, reverse || siv, chacha, reverse, scryptn ? scryptn : DEFAULT_SCRYPTN, volume_name.c_str(), !streams, longnamemax, deterministicnames, mes);
+        bool result = config.create(fs_path.c_str(), config_path.c_str(), password.m_buf, !plaintext_names, plaintext_names, longnames, reverse || siv, chacha, reverse, scryptn ? scryptn : DEFAULT_SCRYPTN, volume_name.c_str(), !streams, longnamemax, deterministicnames, configbackups, dirivbackups, mes);
 
         if (!result) {
             wcerr << mes << endl;

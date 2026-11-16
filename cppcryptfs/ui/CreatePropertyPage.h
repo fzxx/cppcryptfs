@@ -70,7 +70,6 @@ public:
 	afx_msg void OnClickedSelect();
 	afx_msg void OnClickedCreate();
 	virtual BOOL OnInitDialog();
-	afx_msg void OnLbnSelchangeFilenameEncryption();
 	afx_msg void OnCbnSelchangePath();
 	CSecureEdit m_password;
 	CSecureEdit m_password2;
@@ -80,4 +79,8 @@ public:
 	afx_msg void OnClickedLongFileNames();
 	afx_msg void OnClickedDeterministicNames();
 	afx_msg void OnSelchangeScryptn();
+
+	// gray out the DirIV backups checkbox when this fs won't have diriv files
+	// (reverse mode, deterministic names, or unencrypted filenames)
+	void UpdateDirIVBackupsEnabled();
 };

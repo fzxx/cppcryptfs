@@ -45,6 +45,11 @@ class CryptContext;
 class CryptConfig
 {
 public:
+	// why the last read() failed. only a damaged file may be replaced by
+	// its .bak backup; unsupported or resource failures must not be
+	// silently downgraded to an older config
+	enum class ReadFailure { None, Damaged, Unsupported, Resource };
+
 	int m_N;
 	int m_R;
 	int m_P;
@@ -57,6 +62,13 @@ private:
 	LockZeroBuffer<BYTE> *m_pChaChaContentKey;
 	bool m_DirIV;	
 	unsigned long long scrypt_mem();
+	// the config path read() looked at first (the reverse config name when
+	// the path was detected automatically), so a .bak next to it is used
+	wstring m_preferredConfigPath;
+	ReadFailure m_readFailure;
+	// drop all state that comes from a config file, so read() can run again
+	// on the same object after a damaged config was replaced
+	void reset();
 public:
 	wstring m_configPath;
 	bool DirIV() { return m_DirIV; };
@@ -68,6 +80,11 @@ public:
 	bool m_Raw64;
 	bool m_HKDF;
 	bool m_DenyAccessToOthers;
+
+	// per-filesystem backup switches stored in gocryptfs.conf.
+	// m_ConfigBackups covers <config>.bak, m_DirIVBackups covers gocryptfs.diriv.bak
+	bool m_ConfigBackups;
+	bool m_DirIVBackups;
 
 	bool m_reverse;
 
@@ -113,21 +130,33 @@ public:
 	bool decrypt_key(LPCTSTR password);
 
 	bool create(const WCHAR* path, const WCHAR* specified_config_path, const WCHAR* password, bool eme, bool plaintext, bool longfilenames,
-		bool siv, bool chacha, bool reverse, int scryptN, const WCHAR* volume_name, bool disablestreams, int longnamemax, bool deterministicnames, wstring& error_mes		
+		bool siv, bool chacha, bool reverse, int scryptN, const WCHAR* volume_name, bool disablestreams, int longnamemax, bool deterministicnames, bool configbackups, bool dirivbackups, wstring& error_mes
 	);
 
 	bool check_config(wstring& mes);
 
 	bool write_updated_config_file(const char *base64key, const char *scryptSalt, int scryptn);
 
+	// copy the current config file to <config>.bak (best-effort). used before
+	// the config gets replaced and after a volume has been mounted. only
+	// runs when EnableConfigBackups is on in the fs's config
+	bool backup_config_file();
+
+	// true when the last read() failed because the config file itself is
+	// unreadable or damaged, i.e. a .bak may be able to take its place
+	bool CanRestoreFromBak() const { return m_readFailure == ReadFailure::Damaged; };
+
+	// when the config file is missing or damaged, put the <config>.bak copy
+	// back in its place so the volume can still be mounted. a backup is only
+	// used after it has been read, checked and decrypted with password, so a
+	// stale or foreign backup can't replace a working config. recovery itself
+	// does not depend on the switch, so an existing .bak is still usable
+	// after the user turns backups off
+	bool restore_config_from_bak(const WCHAR *password, bool reverse, wstring& error_mes);
+
 	bool init_serial(CryptContext *con);
 
 	DWORD m_fs_feature_disable_mask;
-
-	// Warnings about non-fatal issues (e.g. an unknown feature flag that
-	// cppcryptfs tolerates so the volume can still be mounted).
-	wstring m_warning;
-	const wstring& GetWarning() { return m_warning; }
 
 	WCHAR get_base_drive_letter();
 

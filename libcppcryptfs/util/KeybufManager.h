@@ -61,6 +61,27 @@ public:
 		RegisterBuf(reinterpret_cast<BYTE*>(pBuf->m_buf), pBuf->m_len * sizeof(T));
 	};
 
+	// forget a buffer that was registered earlier, so its owner can free it.
+	// buffers are only tracked while the manager is active and not finalized
+	template <typename T>
+	void UnregisterBuf(LockZeroBuffer<T> *pBuf)
+	{
+		if (!m_bActive || m_bFinalized || !pBuf)
+			return;
+
+		BYTE *p = reinterpret_cast<BYTE*>(pBuf->m_buf);
+
+		for (auto it = m_bufs.begin(); it != m_bufs.end(); ++it) {
+			if (it->ptr == p) {
+				m_total_len -= static_cast<DWORD>(it->len);
+				m_bufs.erase(it);
+				return;
+			}
+		}
+	};
+
+	bool IsFinalized() const { return m_bFinalized; };
+
 	void Activate() { m_bActive = true; };
 	bool Finalize(bool use_key_cache);
 

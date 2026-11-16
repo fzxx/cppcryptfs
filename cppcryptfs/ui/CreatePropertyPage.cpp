@@ -81,7 +81,7 @@ void CCreatePropertyPage::DoDataExchange(CDataExchange* pDX)
 BEGIN_MESSAGE_MAP(CCreatePropertyPage, CPropertyPage)
 	ON_BN_CLICKED(IDC_SELECT, &CCreatePropertyPage::OnClickedSelect)
 	ON_BN_CLICKED(IDC_CREATE, &CCreatePropertyPage::OnClickedCreate)
-	ON_LBN_SELCHANGE(IDC_FILENAME_ENCRYPTION, &CCreatePropertyPage::OnLbnSelchangeFilenameEncryption)
+	ON_CBN_SELCHANGE(IDC_FILENAME_ENCRYPTION, &CCreatePropertyPage::UpdateDirIVBackupsEnabled)
 	ON_CBN_SELCHANGE(IDC_PATH, &CCreatePropertyPage::OnCbnSelchangePath)
 	ON_BN_CLICKED(IDC_REVERSE, &CCreatePropertyPage::OnClickedReverse)
 	ON_BN_CLICKED(IDC_SELECT_CONFIG_PATH, &CCreatePropertyPage::OnClickedSelectConfigPath)
@@ -192,6 +192,8 @@ void CCreatePropertyPage::CreateCryptfs()
 	bool reverse = false;
 	bool disablestreams = false;
 	bool deterministicnames = false;
+	bool configbackups = false;
+	bool dirivbackups = false;
 
 	CComboBox *pBox = (CComboBox *)GetDlgItem(IDC_FILENAME_ENCRYPTION);
 
@@ -222,6 +224,14 @@ void CCreatePropertyPage::CreateCryptfs()
 
 	reverse = IsDlgButtonChecked(IDC_REVERSE) != 0;
 
+	// creation-time defaults only: they are written into the new config file
+	// and remembered in the registry. once a fs exists, its own config file
+	// decides whether backups are made, and recovery ignores the switches
+	configbackups = IsDlgButtonChecked(IDC_CONFIG_BACKUPS) != 0;
+
+	// UpdateDirIVBackupsEnabled() disables the box when this fs has no diriv files
+	dirivbackups = IsDlgButtonChecked(IDC_DIRIV_BACKUPS) != 0;
+
 	pBox = (CComboBox *)GetDlgItem(IDC_DATA_ENCRYPTION);
 
 	nsel = pBox->GetCurSel();
@@ -250,7 +260,7 @@ void CCreatePropertyPage::CreateCryptfs()
 	const int scryptN = stoi((LPCTSTR)sel);	
 
 	theApp.DoWaitCursor(1);
-	bool bResult = config.create(cpath, config_path, password.m_buf, eme, plaintext, longfilenames, siv, chacha, reverse, scryptN, volume_name, disablestreams, longnamemax, deterministicnames, error_mes);
+	bool bResult = config.create(cpath, config_path, password.m_buf, eme, plaintext, longfilenames, siv, chacha, reverse, scryptN, volume_name, disablestreams, longnamemax, deterministicnames, configbackups, dirivbackups, error_mes);
 	theApp.DoWaitCursor(-1);
 
 	if (!bResult) {
@@ -285,6 +295,14 @@ void CCreatePropertyPage::CreateCryptfs()
 	CString creverse = IsDlgButtonChecked(IDC_REVERSE) ? L"1" : L"0";
 
 	theApp.WriteProfileStringW(L"CreateOptions", L"Reverse", creverse);
+
+	CString cconfigbackups = IsDlgButtonChecked(IDC_CONFIG_BACKUPS) ? L"1" : L"0";
+
+	theApp.WriteProfileStringW(L"CreateOptions", L"ConfigBackups", cconfigbackups);
+
+	CString cdirivbackups = IsDlgButtonChecked(IDC_DIRIV_BACKUPS) ? L"1" : L"0";
+
+	theApp.WriteProfileStringW(L"CreateOptions", L"DirIVBackups", cdirivbackups);
 
 	CComboBox* pLbox = (CComboBox*)GetDlgItem(IDC_FILENAME_ENCRYPTION);
 	if (!pLbox)
@@ -394,6 +412,11 @@ BOOL CCreatePropertyPage::OnInitDialog()
 
 	CString creverse = theApp.GetProfileStringW(L"CreateOptions", L"Reverse", L"0");
 
+	// backups are on by default when the user has not chosen yet
+	CString cconfigbackups = theApp.GetProfileStringW(L"CreateOptions", L"ConfigBackups", L"1");
+
+	CString cdirivbackups = theApp.GetProfileStringW(L"CreateOptions", L"DirIVBackups", L"1");
+
 	//To extract localization-independent text from the registry
 	CString cfnenc;
 	CString cfnenc_tmp = theApp.GetProfileStringW(L"CreateOptions", L"FilenameEncryption", L"AES256-EME");
@@ -412,6 +435,10 @@ BOOL CCreatePropertyPage::OnInitDialog()
 	CheckDlgButton(IDC_DISABLE_STREAMS, cdisablestreams == L"1");
 
 	CheckDlgButton(IDC_REVERSE, creverse == L"1");
+
+	CheckDlgButton(IDC_CONFIG_BACKUPS, cconfigbackups == L"1");
+
+	CheckDlgButton(IDC_DIRIV_BACKUPS, cdirivbackups == L"1");
 
 	CComboBox *pBox = (CComboBox*)GetDlgItem(IDC_PATH);
 
@@ -456,6 +483,10 @@ BOOL CCreatePropertyPage::OnInitDialog()
 			pLbox->SelectString(-1, cdataenc);
 		}
 	}
+
+	// the filename encryption combo is fully populated and selected by now,
+	// so the gray-out logic can see the actual selection
+	UpdateDirIVBackupsEnabled();
 
 	pLbox = (CComboBox*)GetDlgItem(IDC_LONGNAMEMAX);
 
@@ -511,12 +542,6 @@ BOOL CCreatePropertyPage::OnInitDialog()
 }
 
 
-void CCreatePropertyPage::OnLbnSelchangeFilenameEncryption()
-{
-	// TODO: Add your control notification handler code here
-}
-
-
 void CCreatePropertyPage::OnCbnSelchangePath()
 {
 	// TODO: Add your control notification handler code here
@@ -535,6 +560,8 @@ void CCreatePropertyPage::OnClickedReverse()
 	BOOL bIsChecked = IsDlgButtonChecked(IDC_REVERSE);
 
 	pEncBox->SelectString(-1, data_encryption_types[bIsChecked ? AES256_SIV_INDEX : AES256_GCM_INDEX]);
+
+	UpdateDirIVBackupsEnabled();
 	
 }
 
@@ -584,6 +611,8 @@ void CCreatePropertyPage::OnClickedLongFileNames()
 void CCreatePropertyPage::OnClickedDeterministicNames()
 {
 	// TODO: Add your control notification handler code here
+
+	UpdateDirIVBackupsEnabled();
 }
 
 void CCreatePropertyPage::OnSelchangeScryptn()
@@ -613,5 +642,34 @@ void CCreatePropertyPage::OnSelchangeScryptn()
 	auto pScryptMemReq = (CStatic*)GetDlgItem(IDC_SCRYPTMEMREQ);
 	if (pScryptMemReq) {
 		pScryptMemReq->SetWindowText(suffix);
+	}
+}
+
+// diriv files exist only in forward mode with encrypted, non-deterministic
+// names, so backing them up makes no sense otherwise -- disable the checkbox
+void CCreatePropertyPage::UpdateDirIVBackupsEnabled()
+{
+	bool have_diriv = !IsDlgButtonChecked(IDC_REVERSE)
+		&& !IsDlgButtonChecked(IDC_DETERMINISTIC_NAMES);
+
+	CWnd *pEncBox = GetDlgItem(IDC_FILENAME_ENCRYPTION);
+
+	if (pEncBox) {
+		// "Plain text" (the localized entry) means filenames aren't encrypted
+		static const CString sPlainText = LocUtils::GetStringFromResources(IDS_PLAIN_TEXT).c_str();
+
+		CString cfenc;
+		pEncBox->GetWindowText(cfenc);
+
+		if (sPlainText.GetLength() > 0 && cfenc == sPlainText)
+			have_diriv = false;
+	}
+
+	auto pChk = GetDlgItem(IDC_DIRIV_BACKUPS);
+	if (pChk) {
+		// the choice is only grayed out here. create() stores the flag as
+		// false when the fs ends up without diriv files, so switching the
+		// mode back and forth keeps the setting the user picked
+		pChk->EnableWindow(have_diriv);
 	}
 }

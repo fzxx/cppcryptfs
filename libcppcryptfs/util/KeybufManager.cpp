@@ -115,6 +115,11 @@ bool KeybufManager::Finalize(bool use_key_cache)
 			bResult = false;
 	}
 
+	// the buffers are in use from here on, so they must not be freed or
+	// registered again
+	if (bResult)
+		m_bFinalized = true;
+
 	return bResult;
 }
 

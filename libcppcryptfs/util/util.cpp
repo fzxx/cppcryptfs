@@ -739,6 +739,8 @@ Initializing (cppcryptfsctl only):
   -V, --volumename=NAME       specify volume name for filesystem
   -T, --plaintext             use plaintext filenames (default is AES256-EME)
   --deterministicnames        disable creation of gocryptfs.diriv files.
+  --configbackups 1|0         enable/disable gocryptfs.conf.bak backups. defaults to disabled (0)
+  --dirivbackups 1|0          enable/disable gocryptfs.diriv.bak backups. defaults to disabled (0)
   -S, --siv                   use AES256-SIV for data encr (default is GCM)
   -X, --chacha                use XChaCha20-Poly1305 for data encr (default is GCM)
   -L, --longnames [1|0]       enable/disable LFNs. defaults to enabled (1)

@@ -36,6 +36,7 @@ THE SOFTWARE.
 
 #include "cryptconfig.h"
 #include <assert.h>
+#include <string.h>
 #include <Shlwapi.h>
 
 // min() and max() macros cause compiler warnings with rapidjson
@@ -69,10 +70,46 @@ THE SOFTWARE.
 
 CryptConfig::CryptConfig()
 {
+	m_pKeyBuf = NULL;
+	m_pGcmContentKey = NULL;
+	m_pChaChaContentKey = NULL;
+
+	reset();
+}
+
+// drop everything that came from a config file, so read() can run again on
+// this object after a damaged config has been replaced by its .bak backup
+void CryptConfig::reset()
+{
+	// free key buffers from an earlier read. nothing has been encrypted with
+	// them at this point, so the manager can forget them
+	if (m_pKeyBuf) {
+		if (!m_keybuf_manager.IsFinalized()) {
+			m_keybuf_manager.UnregisterBuf(m_pKeyBuf);
+			delete m_pKeyBuf;
+		}
+		m_pKeyBuf = NULL;
+	}
+
+	if (m_pGcmContentKey) {
+		if (!m_keybuf_manager.IsFinalized()) {
+			m_keybuf_manager.UnregisterBuf(m_pGcmContentKey);
+			delete m_pGcmContentKey;
+		}
+		m_pGcmContentKey = NULL;
+	}
+
+	if (m_pChaChaContentKey) {
+		if (!m_keybuf_manager.IsFinalized()) {
+			m_keybuf_manager.UnregisterBuf(m_pChaChaContentKey);
+			delete m_pChaChaContentKey;
+		}
+		m_pChaChaContentKey = NULL;
+	}
+
 	m_N = 0;
 	m_R = 0;
 	m_P = 0;
-	
 
 	m_PlaintextNames = false;
 	m_DirIV = false;
@@ -85,20 +122,26 @@ CryptConfig::CryptConfig()
 	m_HKDF = false;
 	m_reverse = false;
 	m_LongNameMax = MAX_LONGNAMEMAX;
-	
-	m_pKeyBuf = NULL;
 
 	m_Version = 0;
 
 	m_serial = DEFAULT_VOLUME_SERIAL_NUMBER;
 
-	m_pGcmContentKey = NULL;
-
-	m_pChaChaContentKey = NULL;
-
 	m_fs_feature_disable_mask = 0;
 
 	m_DenyAccessToOthers = false;
+
+	m_ConfigBackups = false;
+	m_DirIVBackups = false;
+
+	m_VolumeName.clear();
+	m_encrypted_key.clear();
+	m_encrypted_key_salt.clear();
+
+	m_configPath.clear();
+	m_preferredConfigPath.clear();
+
+	m_readFailure = ReadFailure::None;
 }
 
 
@@ -113,18 +156,27 @@ CryptConfig::~CryptConfig()
 bool
 CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 {
+	reset();
+
+	// anything that prevents the config from being read counts as damage
+	// unless a specific failure below says otherwise. only damage can be
+	// repaired from a .bak backup
+	m_readFailure = ReadFailure::Damaged;
 
 	auto File = cppcryptfs::unique_ptr(static_cast<FILE*>(nullptr), fclose);
 	FILE *fl = NULL;
 
 	if (config_file_path) {
-		
+
+		// set this before trying to open so restore_config_from_bak()
+		// knows where to look even if the config file can't be opened
+		m_configPath = config_file_path;
+		m_reverse = reverse;
+
 		if (_wfopen_s(&fl, config_file_path, L"rb")) {
 			mes = LocUtils::GetStringFromResources(IDS_FAILED_OPEN_CONF);
 			return false;
 		}
-		m_configPath = config_file_path;
-		m_reverse = reverse;
 	} else {
 
 		wstring config_path;
@@ -141,18 +193,23 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 
 		wstring config_file = config_path + REVERSE_CONFIG_NAME;
 
+		// remember the first choice, so a .bak next to the reverse config
+		// is used even when the forward config name had to be tried instead
+		m_preferredConfigPath = config_file;
+
+		m_configPath = config_file;
+
 		if (_wfopen_s(&fl, &config_file[0], L"rb")) {
 			config_file = config_path + CONFIG_NAME;
+			m_configPath = config_file;
 			if (_wfopen_s(&fl, &config_file[0], L"rb")) {
 				mes = LocUtils::GetStringFromResources(IDS_FAILED_OPEN_CONF);
 				return false;
 			}
 			m_reverse = false;
-		} else {	
+		} else {
 			m_reverse = true;
 		}
-
-		m_configPath = config_file;
 	}
 
 	File.reset(fl);
@@ -165,6 +222,8 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 	long filesize = ftell(fl);
 
 	if (filesize > MAX_CONFIG_FILE_SIZE) {
+		// a config this large is not something an older .bak should replace
+		m_readFailure = ReadFailure::Unsupported;
 		mes = LocUtils::GetStringFromResources(IDS_CONF_TOO_BIG);
 		return false;
 	}
@@ -184,6 +243,7 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 	char* buf = buf_rsc.get();	
 
 	if (!buf) {
+		m_readFailure = ReadFailure::Resource;
 		mes = LocUtils::GetStringFromResources(IDS_CANNOT_ALLOCATE_BUFFER_CONF);
 		return false;
 	}
@@ -208,8 +268,6 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 
 	bool bret = true;
 
-	m_warning.clear();
-
 	try {
 
 		if (!d.HasMember("EncryptedKey") || !d["EncryptedKey"].IsString()) {
@@ -231,6 +289,12 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 
 		rapidjson::Value& scryptobject = d["ScryptObject"];
 
+		// GetString() is only valid on a string, so a missing or non-string
+		// Salt has to be rejected here and not read
+		if (!scryptobject.HasMember("Salt") || !scryptobject["Salt"].IsString()) {
+			mes = LocUtils::GetStringFromResources(IDS_INVALID_SCRYPTOBJECT);
+			throw (-1);
+		}
 
 		if (!base64_decode(scryptobject["Salt"].GetString(), m_encrypted_key_salt, false, true)) {
 			mes = LocUtils::GetStringFromResources(IDS_FAILED_BASE64_DECODE_SALT);
@@ -253,7 +317,16 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 		m_P = scryptobject["P"].GetInt();
 		int keyLen = scryptobject["KeyLen"].GetInt();
 
+		// scrypt needs N > 1 and a power of two, and R, P > 0. a damaged value
+		// would otherwise fail later during key derivation, where a .bak
+		// restore is no longer attempted
+		if (m_N < 2 || (m_N & (m_N - 1)) != 0 || m_R < 1 || m_P < 1) {
+			mes = LocUtils::GetStringFromResources(IDS_INVALID_SCRYPTOBJECT);
+			throw(-1);
+		}
+
 		if (keyLen != 32) {
+			m_readFailure = ReadFailure::Unsupported;
 			mes = LocUtils::GetStringFromResources(IDS_INVALID_KEYLEN);
 			throw(-1);
 		}
@@ -261,6 +334,7 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 		m_pKeyBuf = new LockZeroBuffer<unsigned char>(keyLen, false);
 
 		if (!m_pKeyBuf->IsLocked()) {
+			m_readFailure = ReadFailure::Resource;
 			mes = LocUtils::GetStringFromResources(IDS_FAILED_LOCK_BUFFER_READ_CONF);
 			throw(-1);
 		}
@@ -291,10 +365,20 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 			string fs_str = fs_val.GetString();
 			try {
 				m_fs_feature_disable_mask = stoul(fs_str, nullptr, 16);
-			} catch (std::invalid_argument&) {
+			} catch (std::exception&) {
 				mes = LocUtils::GetStringFromResources(IDS_INVALID_FSFEATUREDISABLEMASK);
 				throw(-1);
 			}
+		}
+
+		// per-filesystem backup switches. an absent or non-boolean value
+		// leaves the default (off) set by reset()
+		if (d.HasMember("EnableConfigBackups") && d["EnableConfigBackups"].IsBool()) {
+			m_ConfigBackups = d["EnableConfigBackups"].GetBool();
+		}
+
+		if (d.HasMember("EnableDirIVBackups") && d["EnableDirIVBackups"].IsBool()) {
+			m_DirIVBackups = d["EnableDirIVBackups"].GetBool();
 		}
 
 		bool hasLongNameMaxFlag = false;
@@ -328,19 +412,18 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 					} else {
 						// Unknown feature flags are fatal: the volume's data layout
 						// may use an algorithm cppcryptfs does not implement, and
-						// mounting anyway could silently misread data.
+						// mounting anyway could silently misread data. an older
+						// backup must not take over here, so this is not damage
+						m_readFailure = ReadFailure::Unsupported;
 						wstring wflag;
 						if (utf8_to_unicode(itr->GetString(), wflag)) {
 							wchar_t buf[1024];
 							_snwprintf_s(buf, _countof(buf), _TRUNCATE, LocUtils::GetStringFromResources(IDS_UNKNOWN_FEATURE_FLAG).c_str(), wflag.c_str());
 
-							wstring strMsg(buf);
-							// record the warning so it can be shown to the user
-							m_warning += strMsg;
-							// also report it through the error message shown on failed mount
+							// report it through the error message shown on failed mount
 							if (!mes.empty())
 								mes += L" ";
-							mes += strMsg;
+							mes += buf;
 						} else {
 							if (!mes.empty())
 								mes += L" ";
@@ -361,10 +444,12 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 						}
 						m_LongNameMax = lnm;
 					} catch (std::invalid_argument&) {
+						m_readFailure = ReadFailure::Unsupported;
 						mes = LocUtils::GetStringFromResources(IDS_INVALID_LONGNAMEMAX);
 						throw(-1);
 					}
 				} else {
+					m_readFailure = ReadFailure::Unsupported;
 					mes = LocUtils::GetStringFromResources(IDS_NO_VALUE_LONGNAMEMAX);
 					throw(-1);
 				}
@@ -375,6 +460,9 @@ CryptConfig::read(wstring& mes, const WCHAR *config_file_path, bool reverse)
 	} catch (...) {
 		bret = false;
 	}
+
+	if (bret)
+		m_readFailure = ReadFailure::None;
 
 	return bret;
 }
@@ -412,6 +500,182 @@ bool CryptConfig::init_serial(CryptContext *con)
 		this->m_serial = DEFAULT_VOLUME_SERIAL_NUMBER;
 
 	return true;
+}
+
+// true when both files exist and have the same contents
+static bool
+files_are_identical(const wstring& path1, const wstring& path2)
+{
+	HANDLE h1 = ::CreateFile(path1.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+
+	if (h1 == INVALID_HANDLE_VALUE)
+		return false;
+
+	HANDLE h2 = ::CreateFile(path2.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+
+	if (h2 == INVALID_HANDLE_VALUE) {
+		::CloseHandle(h1);
+		return false;
+	}
+
+	bool identical = true;
+
+	BYTE buf1[4096];
+	BYTE buf2[4096];
+
+	for (;;) {
+		DWORD n1 = 0;
+		DWORD n2 = 0;
+		BOOL ok1 = ::ReadFile(h1, buf1, sizeof(buf1), &n1, NULL);
+		BOOL ok2 = ::ReadFile(h2, buf2, sizeof(buf2), &n2, NULL);
+		if (!ok1 || !ok2 || n1 != n2) {
+			identical = false;
+			break;
+		}
+		if (n1 == 0)
+			break;
+		if (memcmp(buf1, buf2, n1) != 0) {
+			identical = false;
+			break;
+		}
+	}
+
+	::CloseHandle(h1);
+	::CloseHandle(h2);
+
+	return identical;
+}
+
+// copy the current config file to <config>.bak. best-effort -- returns false
+// if the copy couldn't be made. the .bak is kept read-only and never hidden
+// so it can always be found when looking for it.
+// only runs when the EnableConfigBackups switch is on in this fs's config.
+bool CryptConfig::backup_config_file()
+{
+	if (!m_ConfigBackups)
+		return false;
+
+	bool bret = false;
+
+	try {
+
+		if (m_configPath.size() < 1)
+			throw(-1);
+
+		wstring bak_path = m_configPath;
+		bak_path += L".bak";
+
+		// a .bak with the same contents is already in place, nothing to do
+		if (files_are_identical(m_configPath, bak_path))
+			return true;
+
+		DWORD dwAttr = GetFileAttributes(m_configPath.c_str());
+
+		if (dwAttr == INVALID_FILE_ATTRIBUTES)
+			throw(-1);
+
+		// the copy goes through a temporary file, so an interrupted copy
+		// can't leave a half-written .bak
+		if (!copy_file_atomic(m_configPath, bak_path)) {
+			DbgPrint(L"backup_config_file: unable to back up %s to %s\n", m_configPath.c_str(), bak_path.c_str());
+			throw(-1);
+		}
+
+		SetFileAttributes(bak_path.c_str(), (dwAttr | FILE_ATTRIBUTE_READONLY) & ~FILE_ATTRIBUTE_HIDDEN);
+
+		bret = true;
+
+	} catch (...) {
+		bret = false;
+	}
+
+	return bret;
+}
+
+// put a .bak copy of the config file back in place. called when the config
+// file itself can't be read (missing or damaged). a backup is only used after
+// it has been read, checked and decrypted with password, so a stale or
+// foreign backup can't take the place of a working config. returns false if
+// no usable backup was found.
+bool CryptConfig::restore_config_from_bak(const WCHAR *password, bool reverse, wstring& error_mes)
+{
+	if (!password)
+		return false;
+
+	// only a damaged or semantically invalid config may be replaced. an
+	// unsupported or resource failure must not be downgraded to an older file
+	if (m_readFailure == ReadFailure::Unsupported || m_readFailure == ReadFailure::Resource)
+		return false;
+
+	// try the path read() wanted first (the reverse config when the name was
+	// detected automatically), then the path it actually looked at. the
+	// preferred path only matters when read() could not open any config file
+	wstring candidates[2];
+
+	int count = 0;
+
+	bool include_preferred = m_readFailure == ReadFailure::Damaged;
+
+	if (include_preferred && m_preferredConfigPath.size() > 0 && m_preferredConfigPath != m_configPath)
+		candidates[count++] = m_preferredConfigPath;
+
+	if (m_configPath.size() > 0)
+		candidates[count++] = m_configPath;
+
+	for (int i = 0; i < count; i++) {
+
+		const wstring& config_path = candidates[i];
+
+		wstring bak_path = config_path;
+		bak_path += L".bak";
+
+		if (GetFileAttributes(bak_path.c_str()) == INVALID_FILE_ATTRIBUTES)
+			continue; // there is no backup to restore from
+
+		// when read() detected the config name itself, the name decides the
+		// mode: a .bak next to the reverse config is a reverse config even if
+		// the caller asked for reverse and read() fell back to the forward one
+		bool candidate_reverse = m_preferredConfigPath.empty()
+			? reverse
+			: config_path == m_preferredConfigPath;
+
+		// verify the backup before it is allowed to replace anything: it has
+		// to parse, pass the semantic checks and decrypt with this password
+		CryptConfig candidate;
+		wstring candidate_mes;
+
+		if (!candidate.read(candidate_mes, bak_path.c_str(), candidate_reverse)
+			|| !candidate.check_config(candidate_mes)
+			|| !candidate.decrypt_key(password)) {
+			DbgPrint(L"restore_config_from_bak: %s did not pass validation\n", bak_path.c_str());
+			continue;
+		}
+
+		if (!copy_file_atomic(bak_path, config_path)) {
+			DbgPrint(L"restore_config_from_bak: unable to restore %s from %s\n", config_path.c_str(), bak_path.c_str());
+			continue;
+		}
+
+		// read-only like create() makes it, and hidden for the default
+		// reverse config name
+		const size_t rlen = wcslen(REVERSE_CONFIG_NAME);
+
+		bool is_default_reverse = candidate_reverse && config_path.size() >= rlen
+			&& !lstrcmpi(config_path.c_str() + config_path.size() - rlen, REVERSE_CONFIG_NAME);
+
+		SetFileAttributes(config_path.c_str(), FILE_ATTRIBUTE_READONLY | (is_default_reverse ? FILE_ATTRIBUTE_HIDDEN : 0));
+
+		m_configPath = config_path;
+		m_reverse = candidate_reverse;
+
+		DbgPrint(L"restore_config_from_bak: restored %s from %s\n", config_path.c_str(), bak_path.c_str());
+
+		return true;
+	}
+
+	error_mes = LocUtils::GetStringFromResources(IDS_CONFIG_BAK_UNUSABLE);
+
+	return false;
 }
 
 bool CryptConfig::write_updated_config_file(const char *base64key, const char *scryptSalt, int scryptn)
@@ -469,7 +733,7 @@ bool CryptConfig::write_updated_config_file(const char *base64key, const char *s
 
 		File.reset();
 
-		if (len < 0)
+		if (len != static_cast<size_t>(filesize))
 			throw(-1);
 
 		buf[len] = '\0';
@@ -563,11 +827,15 @@ bool CryptConfig::write_updated_config_file(const char *base64key, const char *s
 			throw (-1);
 		}
 
+		// save a copy of the current config file before it gets replaced.
+		// backing up is best-effort, so a failure here doesn't block the update.
+		backup_config_file();
+
 		bool bWasReadOnly = false;
 
 		if (dwAttr & FILE_ATTRIBUTE_READONLY) {
 
-			bool bWasReadOnly = true;
+			bWasReadOnly = true;
 
 			dwAttr &= ~FILE_ATTRIBUTE_READONLY;
 
@@ -623,26 +891,34 @@ bool CryptConfig::check_config(wstring& mes)
 {
 	mes = L"";
 
+	// join the individual problems with a newline so the message box stays
+	// readable when more than one check fails
+	auto append = [&mes](const wstring& str) {
+		if (!mes.empty())
+			mes += L"\n";
+		mes += str;
+	};
+
 	if (m_Version != 2)
-		mes += LocUtils::GetStringFromResources(IDS_ONLY_VERSION_2_SUPPORT);
+		append(LocUtils::GetStringFromResources(IDS_ONLY_VERSION_2_SUPPORT));
 
 	if (!m_EMENames && !m_PlaintextNames)
-		mes += LocUtils::GetStringFromResources(IDS_EMENAMES_REQUIRED);
-	
+		append(LocUtils::GetStringFromResources(IDS_EMENAMES_REQUIRED));
+
 	if (!m_GCMIV128 && !m_ChaChaPoly1305) 
-		mes += LocUtils::GetStringFromResources(IDS_GCMIV128_NOT_SPECIFIED);
+		append(LocUtils::GetStringFromResources(IDS_GCMIV128_NOT_SPECIFIED));
 
 	if (m_ChaChaPoly1305 && !m_HKDF)
-		mes += LocUtils::GetStringFromResources(IDS_CHACHA_REQUIRES_HKDF);
+		append(LocUtils::GetStringFromResources(IDS_CHACHA_REQUIRES_HKDF));
 
 	if (m_ChaChaPoly1305 && m_AESSIV)
-		mes += LocUtils::GetStringFromResources(IDS_CHACHA_AESSIV_CONFLICT);
+		append(LocUtils::GetStringFromResources(IDS_CHACHA_AESSIV_CONFLICT));
 
 	if (m_ChaChaPoly1305 && m_GCMIV128)
-		mes += LocUtils::GetStringFromResources(IDS_CHACHA_GCMIV128_CONFLICT);
+		append(LocUtils::GetStringFromResources(IDS_CHACHA_GCMIV128_CONFLICT));
 
 	if (m_reverse && !m_AESSIV)
-		mes += LocUtils::GetStringFromResources(IDS_REVERSE_MODE_WITHOUT_AESSIV);
+		append(LocUtils::GetStringFromResources(IDS_REVERSE_MODE_WITHOUT_AESSIV));
 		
 	return mes.size() == 0;
 }
@@ -887,7 +1163,7 @@ bool CryptConfig::encrypt_key(const wchar_t* password, const BYTE* masterkey, st
 }
 
 
-bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_path, const WCHAR *password, bool eme, bool plaintext, bool longfilenames, bool siv, bool chacha, bool reverse, int scryptN, const WCHAR *volume_name, bool disablestreams, int longnamemax, bool deterministicnames, wstring& error_mes)
+bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_path, const WCHAR *password, bool eme, bool plaintext, bool longfilenames, bool siv, bool chacha, bool reverse, int scryptN, const WCHAR *volume_name, bool disablestreams, int longnamemax, bool deterministicnames, bool configbackups, bool dirivbackups, wstring& error_mes)
 {
 
 	if (specified_config_file_path && *specified_config_file_path == '\0')
@@ -895,7 +1171,11 @@ bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_p
 
 	m_basedir = path;
 
-	bool bret = true;	
+	bool bret = true;
+
+	// record the per-filesystem backup switches in the config file
+	m_ConfigBackups = configbackups;
+	m_DirIVBackups = dirivbackups;
 
 	if (eme)
 		m_EMENames = TRUE;
@@ -947,6 +1227,8 @@ bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_p
 			config_path += m_reverse ? REVERSE_CONFIG_NAME : CONFIG_NAME;
 
 		}
+
+		m_configPath = config_path;
 
 		if (m_reverse && !m_AESSIV) {
 			error_mes = LocUtils::GetStringFromResources(IDS_ONLY_AES256SIV_WITH_REVERSE);
@@ -1056,6 +1338,8 @@ bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_p
 		fprintf(fl, "\t\"Version\": %d,\n", m_Version);
 		fprintf(fl, "\t\"VolumeName\": \"%s\",\n", volume_name_utf8.c_str());
 		fprintf(fl, "\t\"FsFeatureDisableMask\": \"%s\",\n", fs_feature_disable_mask.c_str());
+		fprintf(fl, "\t\"EnableConfigBackups\": %s,\n", m_ConfigBackups ? "true" : "false");
+		fprintf(fl, "\t\"EnableDirIVBackups\": %s,\n", (m_DirIVBackups && m_DirIV && !m_reverse) ? "true" : "false");
 		fprintf(fl, "\t\"FeatureFlags\": [\n");
 		if (m_EMENames)
 			fprintf(fl, "\t\t\"EMENames\",\n");
@@ -1088,6 +1372,10 @@ bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_p
 		}
 		fprintf(fl, "}\n");
 
+		// close before touching the attributes or copying the file, so
+		// nothing is left in the stdio buffer
+		File.reset();
+
 		DWORD attr = GetFileAttributesW(&config_path[0]);
 		if (attr != INVALID_FILE_ATTRIBUTES) {
 			attr |= FILE_ATTRIBUTE_READONLY | (m_reverse && !specified_config_file_path ? FILE_ATTRIBUTE_HIDDEN : 0);
@@ -1098,6 +1386,23 @@ bool CryptConfig::create(const WCHAR *path, const WCHAR *specified_config_file_p
 			if (!create_dir_iv(NULL, &m_basedir[0])) {
 				error_mes = LocUtils::GetStringFromResources(IDS_CANNOT_CREATE_DIRIV);
 				throw(-1);
+			}
+		}
+
+		// leave the first backups behind right away, so the new fs is
+		// protected before it has ever been mounted
+		backup_config_file();
+
+		if (m_DirIVBackups && m_DirIV && !m_reverse) {
+			wstring diriv_path = m_basedir;
+
+			if (diriv_path.size() > 0 && diriv_path[diriv_path.size() - 1] != '\\')
+				diriv_path.push_back('\\');
+
+			diriv_path += DIR_IV_NAME;
+
+			if (!backup_dir_iv_file(diriv_path)) {
+				DbgPrint(L"create: unable to back up %s\n", diriv_path.c_str());
 			}
 		}
 
